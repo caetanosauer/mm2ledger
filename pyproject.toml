@@ -1,0 +1,21 @@
+[project]
+name = "mm2ledger"
+version = "0.1.0"
+description = "Import transactions from MoneyMoney into ledger journal files"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "click>=8.0",
+    "tomli-w>=1.0",
+]
+
+[project.scripts]
+mm2ledger = "mm2ledger.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mm2ledger"]
