@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
     "click>=8.0",
+    "questionary>=2.0",
     "tomli-w>=1.0",
 ]
 

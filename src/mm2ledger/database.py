@@ -4,6 +4,23 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
+
+MONEYMONEY_DB_PATH = (
+    Path.home()
+    / "Library/Containers/com.moneymoney-app.retail/Data"
+    / "Library/Application Support/MoneyMoney/Database/MoneyMoney.sqlite"
+)
+
+
+def find_database() -> str | None:
+    """Auto-discover the MoneyMoney database at its default macOS location.
+
+    Returns the path as a string if found, None otherwise.
+    """
+    if MONEYMONEY_DB_PATH.exists():
+        return str(MONEYMONEY_DB_PATH)
+    return None
 
 
 @dataclass

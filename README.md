@@ -11,12 +11,10 @@ Import transactions from [MoneyMoney](https://moneymoney-app.com/) into [ledger]
 ## Installation
 
 ```bash
-uv tool install mm2ledger
-```
+# From local checkout
+uv tool install /path/to/mm2ledger
 
-Or for development:
-
-```bash
+# For development
 git clone https://github.com/your/mm2ledger
 cd mm2ledger
 uv sync
@@ -26,23 +24,23 @@ uv sync
 
 ### 1. Configure
 
-Point mm2ledger at your MoneyMoney database:
-
 ```bash
 export MM_DB_PASSWORD='your-database-password'
-mm2ledger config --db-path ~/Library/Containers/com.moneymoney-app.retail/Data/Library/Application\ Support/MoneyMoney/Database/MoneyMoney.sqlite
+mm2ledger config
 ```
 
-This discovers all accounts and writes `mm2ledger.toml`. Edit the file to:
-- Enable the accounts you want to import (`enabled = true`)
-- Set the ledger account names (e.g., `ledger_account = "Assets:Checking"`)
-- Set the start date for each account
+This walks you through an interactive setup:
+- Auto-discovers the MoneyMoney database at its default macOS location
+- Tests the database connection and re-prompts on failure
+- Lets you select which accounts to enable via a checkbox list
+- Asks for ledger account names and start dates for new accounts
+- Writes everything to `mm2ledger.toml`
 
 ### 2. Import
 
 ```bash
 # Import all enabled accounts
-mm2ledger import --all
+mm2ledger import
 
 # Import a specific account
 mm2ledger import --account "Assets:Checking"
@@ -56,7 +54,7 @@ Re-run `config` any time to pick up new accounts:
 mm2ledger config
 ```
 
-Existing account settings are preserved; new accounts are added as disabled.
+Previously configured accounts keep their settings; new accounts are interviewed individually.
 
 ## Configuration
 
@@ -78,7 +76,6 @@ cipher_compatibility = 4
 
 [ledger]
 dir = "./ledger"
-rules_file = "rules.journal"
 
 [schema]
 purpose_column = "a1717838516"
@@ -93,9 +90,9 @@ start_date = "2024-01-01"
 enabled = true
 ```
 
-### Categorization Rules
+### Categorization Rules (Optional)
 
-Create a `rules.journal` file using ledger's native payee-matching syntax:
+If a `rules.journal` file exists in the ledger directory, it will be used by `ledger convert` for automatic categorization via ledger's native payee-matching syntax:
 
 ```
 account Expenses:Supermarket
@@ -112,7 +109,7 @@ account Expenses:Transportation
 
 1. Reads transactions from MoneyMoney's encrypted SQLite database via `sqlcipher`
 2. Converts them to CSV with UUID-based identifiers for duplicate detection
-3. Runs `ledger convert` with your rules file for automatic categorization
+3. Runs `ledger convert` (with optional rules file) for automatic categorization
 4. Appends new transactions to per-account journal files
 5. Preserves full transaction metadata as JSON comments
 

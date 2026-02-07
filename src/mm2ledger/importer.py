@@ -35,7 +35,8 @@ def import_account(config: Config, account: AccountConfig) -> int:
     journal_path = ledger_dir / account.journal_file
     rules_path = ledger_dir / config.rules_file
 
-    # Create journal file if it doesn't exist
+    # Create ledger dir and journal file if they don't exist
+    ledger_dir.mkdir(parents=True, exist_ok=True)
     if not journal_path.exists():
         journal_path.touch()
 
@@ -44,7 +45,10 @@ def import_account(config: Config, account: AccountConfig) -> int:
 
     try:
         output = _run_ledger_convert(
-            csv_path, rules_path, journal_path, account.ledger_account
+            csv_path,
+            rules_path if rules_path.exists() else None,
+            journal_path,
+            account.ledger_account,
         )
     finally:
         Path(csv_path).unlink(missing_ok=True)
@@ -88,7 +92,7 @@ def _write_csv(transactions: list[dict]) -> str:
 
 def _run_ledger_convert(
     csv_path: str,
-    rules_path: Path,
+    rules_path: Path | None,
     journal_path: Path,
     account_name: str,
 ) -> str:
@@ -99,11 +103,12 @@ def _run_ledger_convert(
         csv_path,
         "--no-pager",
         "--invert",
-        "--file", str(rules_path),
         "--file", str(journal_path),
         "--date-format=%Y-%m-%d",
         "--account", account_name,
     ]
+    if rules_path:
+        cmd.extend(["--file", str(rules_path)])
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     except FileNotFoundError:

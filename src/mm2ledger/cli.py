@@ -1,13 +1,14 @@
 """CLI entry point for mm2ledger."""
 
-import sys
 from pathlib import Path
 
 import click
+import questionary
 
 from .config import (
     DEFAULT_CONFIG_FILE,
     DEFAULT_PASSWORD_SOURCE,
+    DEFAULT_START_DATE,
     AccountConfig,
     Config,
     generate_journal_filename,
@@ -16,7 +17,7 @@ from .config import (
     merge_accounts,
     save_config,
 )
-from .database import discover_purpose_column, list_accounts
+from .database import discover_purpose_column, find_database, list_accounts
 from .importer import import_account, import_all
 from .password import resolve_password
 
@@ -27,16 +28,148 @@ def main():
     """Import MoneyMoney transactions into ledger journal files."""
 
 
+def _prompt_database_path(default: str | None = None) -> str:
+    """Prompt for database path, auto-discovering if possible."""
+    discovered = find_database()
+    effective_default = default or discovered
+
+    if effective_default:
+        path = questionary.text(
+            "MoneyMoney database path:",
+            default=effective_default,
+        ).ask()
+    else:
+        path = questionary.text(
+            "MoneyMoney database path (not auto-detected):",
+        ).ask()
+
+    if not path:
+        raise click.Abort()
+    return path
+
+
+def _prompt_password_source(default: str = DEFAULT_PASSWORD_SOURCE) -> str:
+    """Prompt for password source type, then details."""
+    # Determine default selection from existing source
+    if default.startswith("op://"):
+        default_type = "1password"
+        default_value = default
+    else:
+        default_type = "env"
+        default_value = default.removeprefix("env:")
+
+    source_type = questionary.select(
+        "Password source:",
+        choices=[
+            questionary.Choice("Environment variable", value="env"),
+            questionary.Choice("1Password CLI", value="1password"),
+        ],
+        default="env" if default_type == "env" else "1password",
+    ).ask()
+    if not source_type:
+        raise click.Abort()
+
+    if source_type == "env":
+        var_name = questionary.text(
+            "Environment variable name:",
+            default=default_value if default_type == "env" else "MM_DB_PASSWORD",
+        ).ask()
+        if not var_name:
+            raise click.Abort()
+        return f"env:{var_name}"
+    else:
+        op_ref = questionary.text(
+            "1Password reference (op://vault/item/field):",
+            default=default_value if default_type == "1password" else "op://",
+        ).ask()
+        if not op_ref:
+            raise click.Abort()
+        return op_ref
+
+
+def _test_connection(db_path: str, pw_source: str, cipher_compat: int = 4):
+    """Test database connection. Returns (password, accounts, purpose_col) or raises."""
+    pw = resolve_password(pw_source)
+    accounts = list_accounts(db_path, pw, cipher_compat)
+    purpose_col = discover_purpose_column(db_path, pw, cipher_compat)
+    return pw, accounts, purpose_col
+
+
+def _prompt_account_selection(
+    discovered: list[AccountConfig],
+    existing_enabled_ids: set[int] | None = None,
+) -> list[AccountConfig]:
+    """Show checkbox list of accounts, return selected ones."""
+    choices = []
+    for acc in discovered:
+        label = f"[{acc.id:>3}] {acc.mm_name} ({acc.currency})"
+        checked = acc.id in existing_enabled_ids if existing_enabled_ids else False
+        choices.append(questionary.Choice(title=label, value=acc.id, checked=checked))
+
+    selected_ids = questionary.checkbox(
+        "Select accounts to enable:",
+        choices=choices,
+    ).ask()
+
+    if selected_ids is None:
+        raise click.Abort()
+
+    selected_set = set(selected_ids)
+    for acc in discovered:
+        acc.enabled = acc.id in selected_set
+
+    return [acc for acc in discovered if acc.enabled]
+
+
+def _prompt_account_details(
+    account: AccountConfig,
+    existing: AccountConfig | None = None,
+) -> None:
+    """Prompt for per-account ledger name and start date."""
+    default_ledger = existing.ledger_account if existing else account.ledger_account
+    default_start = existing.start_date if existing else DEFAULT_START_DATE
+
+    click.echo(f"\n  [{account.id}] {account.mm_name} ({account.currency})")
+
+    ledger_name = questionary.text(
+        "    Ledger account:",
+        default=default_ledger,
+    ).ask()
+    if not ledger_name:
+        raise click.Abort()
+    account.ledger_account = ledger_name
+    account.journal_file = generate_journal_filename(ledger_name)
+
+    start_date = questionary.text(
+        "    Start date:",
+        default=default_start,
+    ).ask()
+    if not start_date:
+        raise click.Abort()
+    account.start_date = start_date
+
+
+def _write_index_journal(cfg: Config) -> None:
+    """Write index.journal with include directives for all enabled accounts."""
+    ledger_dir = Path(cfg.ledger_dir)
+    ledger_dir.mkdir(parents=True, exist_ok=True)
+    index_path = ledger_dir / "index.journal"
+
+    lines = []
+    if cfg.rules_file:
+        rules_path = ledger_dir / cfg.rules_file
+        if rules_path.exists():
+            lines.append(f"include {cfg.rules_file}")
+
+    for acc in cfg.accounts:
+        if acc.enabled:
+            lines.append(f"include {acc.journal_file}")
+
+    index_path.write_text("\n".join(lines) + "\n")
+    click.echo(f"Written {index_path}")
+
+
 @main.command()
-@click.option(
-    "--db-path",
-    type=click.Path(),
-    help="Path to MoneyMoney SQLite database.",
-)
-@click.option(
-    "--password-source",
-    help=f"Password source (default: {DEFAULT_PASSWORD_SOURCE}).",
-)
 @click.option(
     "--config-file",
     "-c",
@@ -44,69 +177,50 @@ def main():
     show_default=True,
     help="Config file path.",
 )
-@click.option(
-    "--ledger-dir",
-    help="Directory for ledger journal files (default: ./ledger).",
-)
-@click.option(
-    "--rules-file",
-    help="Ledger rules file name (default: rules.journal).",
-)
-def config(db_path, password_source, config_file, ledger_dir, rules_file):
-    """Discover accounts and create/update configuration.
-
-    On first run, provide --db-path to specify the MoneyMoney database.
-    On subsequent runs, the database path is read from the config file.
-    New accounts are added as disabled — edit the config to enable them.
-    """
+def config(config_file):
+    """Interactive setup — discover accounts and create/update configuration."""
     config_path = Path(config_file)
     existing_config = None
 
     if config_path.exists():
         existing_config = load_config(config_path)
-        click.echo(f"Updating existing config: {config_file}")
+        click.echo(f"Updating existing config: {config_file}\n")
 
-    # Resolve database path
-    effective_db_path = db_path
-    if not effective_db_path and existing_config:
-        effective_db_path = existing_config.database_path
-    if not effective_db_path:
-        raise click.UsageError(
-            "No database path specified.\n"
-            "Run: mm2ledger config --db-path /path/to/MoneyMoney.sqlite"
-        )
+    # 1. Database path
+    default_db = existing_config.database_path if existing_config else None
+    db_path = _prompt_database_path(default=default_db)
 
-    # Resolve password source
-    effective_pw_source = password_source
-    if not effective_pw_source and existing_config:
-        effective_pw_source = existing_config.password_source
-    if not effective_pw_source:
-        effective_pw_source = DEFAULT_PASSWORD_SOURCE
-
-    # Resolve password and connect to database
-    try:
-        pw = resolve_password(effective_pw_source)
-    except (ValueError, RuntimeError) as e:
-        raise click.ClickException(str(e))
-
-    # Resolve cipher compatibility
+    # 2. Password source — prompt and test connection in a loop
+    default_pw = existing_config.password_source if existing_config else DEFAULT_PASSWORD_SOURCE
     cipher_compat = existing_config.cipher_compatibility if existing_config else 4
 
-    # Discover accounts
-    click.echo("Connecting to database...")
-    try:
-        db_accounts = list_accounts(effective_db_path, pw, cipher_compat)
-    except RuntimeError as e:
-        raise click.ClickException(str(e))
+    while True:
+        pw_source = _prompt_password_source(default=default_pw)
+        click.echo("Testing connection...")
+        try:
+            _pw, db_accounts, purpose_col = _test_connection(db_path, pw_source, cipher_compat)
+            click.echo(
+                click.style(f"Connected — found {len(db_accounts)} accounts.", fg="green")
+            )
+            break
+        except (ValueError, RuntimeError) as e:
+            click.echo(click.style(f"Connection failed: {e}", fg="red"))
+            default_pw = pw_source  # keep what they typed as default for retry
 
-    click.echo(f"Found {len(db_accounts)} accounts in MoneyMoney database.\n")
+    # 3. Ledger directory
+    default_ledger_dir = existing_config.ledger_dir if existing_config else "./ledger"
+    ledger_dir = questionary.text(
+        "Ledger directory:", default=default_ledger_dir
+    ).ask()
+    if not ledger_dir:
+        raise click.Abort()
 
-    # Discover purpose column
-    purpose_col = discover_purpose_column(effective_db_path, pw, cipher_compat)
+    rules_file = existing_config.rules_file if existing_config else "rules.journal"
+
     if purpose_col:
         click.echo(f"Discovered purpose column: {purpose_col}")
 
-    # Build account configs from discovered accounts
+    # 5. Build discovered account configs
     discovered = []
     for acc in db_accounts:
         ledger_acct = generate_ledger_account(acc.name)
@@ -122,27 +236,42 @@ def config(db_path, password_source, config_file, ledger_dir, rules_file):
             )
         )
 
-    # Merge with existing config
+    # Merge with existing config to preserve settings
+    existing_by_id: dict[int, AccountConfig] = {}
     if existing_config and existing_config.accounts:
-        merged, new, removed = merge_accounts(existing_config.accounts, discovered)
-        if new:
-            click.echo(f"\nNew accounts found ({len(new)}):")
-            for acc in new:
-                click.echo(f"  [{acc.id}] {acc.mm_name} ({acc.currency})")
+        merged, _new, removed = merge_accounts(existing_config.accounts, discovered)
+        existing_by_id = {a.id: a for a in existing_config.accounts}
         if removed:
             click.echo(f"\nAccounts no longer in database: {removed}")
-            click.echo("  (removed from config)")
     else:
         merged = discovered
-        new = discovered
 
-    # Build final config
+    # 6. Account selection — checkbox with previously enabled ones pre-checked
+    existing_enabled_ids = {
+        a.id for a in existing_config.accounts if a.enabled
+    } if existing_config else None
+
+    click.echo("")
+    enabled_accounts = _prompt_account_selection(merged, existing_enabled_ids)
+
+    # 7. Per-account customization — only interview newly selected accounts
+    previously_configured_ids = set(existing_by_id.keys()) if existing_by_id else set()
+    accounts_needing_interview = [
+        acc for acc in enabled_accounts if acc.id not in previously_configured_ids
+    ]
+
+    if accounts_needing_interview:
+        click.echo(f"\nConfigure {len(accounts_needing_interview)} new account(s):")
+        for acc in accounts_needing_interview:
+            _prompt_account_details(acc, existing_by_id.get(acc.id))
+
+    # 8. Save
     final_config = Config(
-        database_path=effective_db_path,
-        password_source=effective_pw_source,
+        database_path=db_path,
+        password_source=pw_source,
         cipher_compatibility=cipher_compat,
-        ledger_dir=ledger_dir or (existing_config.ledger_dir if existing_config else "./ledger"),
-        rules_file=rules_file or (existing_config.rules_file if existing_config else "rules.journal"),
+        ledger_dir=ledger_dir,
+        rules_file=rules_file,
         purpose_column=purpose_col or (existing_config.purpose_column if existing_config else None),
         accounts=merged,
     )
@@ -150,23 +279,19 @@ def config(db_path, password_source, config_file, ledger_dir, rules_file):
     save_config(final_config, config_path)
     click.echo(f"\nConfig written to {config_file}")
 
+    # Generate index.journal with includes for all enabled accounts
+    _write_index_journal(final_config)
+
     # Print summary
     enabled_count = sum(1 for a in merged if a.enabled)
-    click.echo(f"\nAccounts: {len(merged)} total, {enabled_count} enabled")
-    click.echo("")
+    click.echo(f"Accounts: {len(merged)} total, {enabled_count} enabled\n")
     for acc in merged:
-        status = "enabled" if acc.enabled else "disabled"
-        click.echo(f"  [{acc.id:>3}] {acc.mm_name:<40} {acc.currency:<5} {status}")
-
-    if not enabled_count:
-        click.echo(
-            f"\nEdit {config_file} to enable accounts and customize ledger account names."
-        )
+        status = click.style("enabled", fg="green") if acc.enabled else click.style("disabled", fg="red")
+        click.echo(f"  [{acc.id:>3}] {acc.mm_name:<40} {status}")
 
 
 @main.command("import")
-@click.option("--all", "import_all_flag", is_flag=True, help="Import all enabled accounts.")
-@click.option("--account", "account_name", help="Import a specific account by ledger name.")
+@click.option("--account", "account_name", help="Import only this account (by ledger name). Default: all enabled.")
 @click.option(
     "--config-file",
     "-c",
@@ -174,24 +299,21 @@ def config(db_path, password_source, config_file, ledger_dir, rules_file):
     show_default=True,
     help="Config file path.",
 )
-def import_cmd(import_all_flag, account_name, config_file):
-    """Import transactions from MoneyMoney into ledger journals."""
+def import_cmd(account_name, config_file):
+    """Import transactions from MoneyMoney into ledger journals.
+
+    Imports all enabled accounts by default, or a single account with --account.
+    """
     config_path = Path(config_file)
     if not config_path.exists():
         raise click.ClickException(
             f"Config file not found: {config_file}\n"
-            f"Run 'mm2ledger config --db-path /path/to/db.sqlite' first."
+            f"Run 'mm2ledger config' first."
         )
 
     cfg = load_config(config_path)
 
-    if not import_all_flag and not account_name:
-        raise click.UsageError(
-            "Specify --all to import all enabled accounts, "
-            "or --account to import a specific account."
-        )
-
-    if import_all_flag:
+    if not account_name:
         results = import_all(cfg)
         total = sum(results.values())
         for acct, count in results.items():
@@ -201,7 +323,7 @@ def import_cmd(import_all_flag, account_name, config_file):
                 click.echo(f"  {acct}: up to date")
         click.echo(f"\nTotal: {total} new transactions across {len(results)} accounts")
 
-    elif account_name:
+    else:
         # Find the account
         matching = [a for a in cfg.accounts if a.ledger_account == account_name]
         if not matching:
