@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-mm2ledger imports transactions from MoneyMoney's encrypted SQLite database into ledger-cli journal files. It's a Python CLI tool that replaces a shell-based import pipeline.
+mm2ledger imports transactions from MoneyMoney's encrypted SQLite database into ledger-cli journal files.
 
 ## Architecture
 
