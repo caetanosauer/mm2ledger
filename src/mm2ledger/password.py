@@ -10,7 +10,7 @@ def resolve_password(source: str) -> str:
     Supported sources:
         env:VAR_NAME        - Read from environment variable
         op://vault/item/field - Read from 1Password CLI
-        keychain:service    - Read from macOS Keychain (not yet implemented)
+        keychain:service    - Read from macOS login Keychain (security find-generic-password)
     """
     if source.startswith("env:"):
         return _from_env(source[4:])
@@ -57,7 +57,22 @@ def _from_1password(reference: str) -> str:
 
 
 def _from_keychain(service: str) -> str:
-    raise NotImplementedError(
-        "macOS Keychain support is not yet implemented.\n"
-        "Use env: or op:// password sources instead."
-    )
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-w"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+    except FileNotFoundError:
+        raise RuntimeError(
+            "macOS 'security' tool not found (Keychain is macOS-only)."
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"Failed to read password from Keychain (service {service!r}): "
+            f"{e.stderr.strip() or 'item not found'}\n"
+            f"Add it with: "
+            f'security add-generic-password -a "$USER" -s {service} -w -A'
+        )
