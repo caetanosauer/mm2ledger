@@ -17,7 +17,12 @@ from .config import (
     merge_accounts,
     save_config,
 )
-from .database import discover_purpose_column, find_database, list_accounts
+from .database import (
+    DatabaseLockedError,
+    discover_purpose_column,
+    find_database,
+    list_accounts,
+)
 from .importer import import_account, import_all
 from .password import resolve_password
 
@@ -313,38 +318,42 @@ def import_cmd(account_name, config_file):
 
     cfg = load_config(config_path)
 
-    if not account_name:
-        results = import_all(cfg)
-        total = sum(results.values())
-        for acct, count in results.items():
-            if count > 0:
-                click.echo(f"  {acct}: {count} new transactions")
-            else:
-                click.echo(f"  {acct}: up to date")
-        click.echo(f"\nTotal: {total} new transactions across {len(results)} accounts")
+    try:
+        if not account_name:
+            results = import_all(cfg)
+            total = sum(results.values())
+            for acct, count in results.items():
+                if count > 0:
+                    click.echo(f"  {acct}: {count} new transactions")
+                else:
+                    click.echo(f"  {acct}: up to date")
+            click.echo(f"\nTotal: {total} new transactions across {len(results)} accounts")
 
-    else:
-        # Find the account
-        matching = [a for a in cfg.accounts if a.ledger_account == account_name]
-        if not matching:
-            available = [a.ledger_account for a in cfg.accounts if a.enabled]
-            raise click.ClickException(
-                f"Account not found: {account_name}\n"
-                f"Available accounts: {', '.join(available) or '(none enabled)'}"
-            )
-
-        account = matching[0]
-        if not account.enabled:
-            raise click.ClickException(
-                f"Account {account_name} is disabled. "
-                f"Enable it in {config_file} first."
-            )
-
-        count = import_account(cfg, account)
-        if count > 0:
-            click.echo(f"{account.ledger_account}: {count} new transactions")
         else:
-            click.echo(f"{account.ledger_account}: up to date")
+            # Find the account
+            matching = [a for a in cfg.accounts if a.ledger_account == account_name]
+            if not matching:
+                available = [a.ledger_account for a in cfg.accounts if a.enabled]
+                raise click.ClickException(
+                    f"Account not found: {account_name}\n"
+                    f"Available accounts: {', '.join(available) or '(none enabled)'}"
+                )
+
+            account = matching[0]
+            if not account.enabled:
+                raise click.ClickException(
+                    f"Account {account_name} is disabled. "
+                    f"Enable it in {config_file} first."
+                )
+
+            count = import_account(cfg, account)
+            if count > 0:
+                click.echo(f"{account.ledger_account}: {count} new transactions")
+            else:
+                click.echo(f"{account.ledger_account}: up to date")
+    except DatabaseLockedError as e:
+        click.echo(click.style(f"{e} Skipping import.", fg="yellow"))
+        raise SystemExit(2)
 
 
 @main.command("list")

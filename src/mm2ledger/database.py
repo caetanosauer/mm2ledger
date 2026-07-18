@@ -6,6 +6,11 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+
+class DatabaseLockedError(RuntimeError):
+    """Raised when the MoneyMoney database is locked (MoneyMoney is open)."""
+
+
 MONEYMONEY_DB_PATH = (
     Path.home()
     / "Library/Containers/com.moneymoney-app.retail/Data"
@@ -64,6 +69,10 @@ def _run_sqlcipher(
         )
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.strip()
+        if "database is locked" in stderr:
+            raise DatabaseLockedError(
+                "MoneyMoney is open — the database is locked."
+            )
         if "file is not a database" in stderr or "not a db" in stderr:
             raise RuntimeError(
                 "Failed to open database. Check that the password is correct "
